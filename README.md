@@ -1,5 +1,12 @@
 # Project README
 
+Demo:
+
+
+https://github.com/user-attachments/assets/93749ac7-d9a3-4818-bc3d-6acbdaa68be3
+
+
+
 This repo has two parts:
 
 * **Backend contracts** written in Python/TEAL
