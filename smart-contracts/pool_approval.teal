@@ -1,0 +1,583 @@
+#pragma version 8
+
+// Globals:
+// admin        : address
+// a_id         : uint64
+// b_id         : uint64
+// hook_app_id  : uint64
+// hook_mask    : uint64
+// p_fee_bp     : uint64
+//
+// Box per slot (key = "slot:" || be_u64(slot)):
+// value = be_u64(reserve_a) || be_u64(reserve_b)
+
+// ---- Entry routing ----
+txn ApplicationID
+int 0
+==
+bnz on_create
+
+txn OnCompletion
+int UpdateApplication
+==
+bnz on_update
+
+txn OnCompletion
+int NoOp
+==
+bnz on_noop
+
+err
+
+// ---- CREATE ----
+on_create:
+byte "admin"
+txn Sender
+app_global_put
+
+byte "a_id"
+int 0
+app_global_put
+byte "b_id"
+int 0
+app_global_put
+byte "hook_app_id"
+int 0
+app_global_put
+byte "hook_mask"
+int 0
+app_global_put
+byte "p_fee_bp"
+int 0
+app_global_put
+
+int 1
+return
+
+// ---- UPDATE (creator only) ----
+on_update:
+global CreatorAddress
+txn Sender
+==
+assert
+int 1
+return
+
+// ---- NOOP dispatcher ----
+on_noop:
+txna ApplicationArgs 0
+byte "opt_in_assets"
+==
+bnz m_optin
+
+txna ApplicationArgs 0
+byte "set_hooks"
+==
+bnz m_hooks
+
+txna ApplicationArgs 0
+byte "mint"
+==
+bnz m_mint
+
+txna ApplicationArgs 0
+byte "swap"
+==
+bnz m_swap
+
+err
+
+// ---- METHODS ----
+
+// opt_in_assets(assetA, assetB) (admin)
+m_optin:
+byte "admin"
+app_global_get
+txn Sender
+==
+assert
+
+txn NumAppArgs
+int 3
+==
+assert
+
+// store ids
+byte "a_id"
+txna ApplicationArgs 1
+btoi
+dup
+store 1
+app_global_put
+
+byte "b_id"
+txna ApplicationArgs 2
+btoi
+dup
+store 2
+app_global_put
+
+// inner 0-axfers to opt-in
+global CurrentApplicationAddress
+store 0
+
+itxn_begin
+int 4
+itxn_field TypeEnum
+load 0
+itxn_field AssetReceiver
+load 1
+itxn_field XferAsset
+int 0
+itxn_field AssetAmount
+itxn_submit
+
+itxn_begin
+int 4
+itxn_field TypeEnum
+load 0
+itxn_field AssetReceiver
+load 2
+itxn_field XferAsset
+int 0
+itxn_field AssetAmount
+itxn_submit
+
+int 1
+return
+
+// set_hooks(hook_app_id, hook_mask, p_fee_bp) (admin)
+m_hooks:
+byte "admin"
+app_global_get
+txn Sender
+==
+assert
+
+txn NumAppArgs
+int 4
+==
+assert
+
+byte "hook_app_id"
+txna ApplicationArgs 1
+btoi
+app_global_put
+
+byte "hook_mask"
+txna ApplicationArgs 2
+btoi
+app_global_put
+
+byte "p_fee_bp"
+txna ApplicationArgs 3
+btoi
+app_global_put
+
+int 1
+return
+
+// util: slot_from_args -> [3]
+slot_from_args:
+txn NumAppArgs
+int 2
+<
+bnz slot_default
+txna ApplicationArgs 1
+btoi
+store 3
+retsub
+slot_default:
+int 0
+store 3
+retsub
+
+// util: box key for slot in [3]
+push_box_key:
+byte "slot:"
+load 3
+itob
+concat
+retsub
+
+// mint([slot]) -> group: appl, axfer A, axfer B
+m_mint:
+global GroupSize
+int 3
+==
+assert
+gtxn 0 TypeEnum
+int 6
+==
+assert
+gtxn 1 TypeEnum
+int 4
+==
+assert
+gtxn 2 TypeEnum
+int 4
+==
+assert
+
+byte "a_id"
+app_global_get
+store 1
+byte "b_id"
+app_global_get
+store 2
+global CurrentApplicationAddress
+store 0
+
+// receiver checks
+gtxn 1 AssetReceiver
+load 0
+==
+assert
+gtxn 2 AssetReceiver
+load 0
+==
+assert
+
+// amounts
+int 0
+store 4   // amtA
+int 0
+store 5   // amtB
+
+gtxn 1 XferAsset
+load 1
+==
+bnz g1_is_a
+gtxn 1 XferAsset
+load 2
+==
+assert
+gtxn 1 AssetAmount
+store 5
+b g2
+g1_is_a:
+gtxn 1 AssetAmount
+store 4
+g2:
+gtxn 2 XferAsset
+load 1
+==
+bnz g2_is_a
+gtxn 2 XferAsset
+load 2
+==
+assert
+gtxn 2 AssetAmount
+store 5
+b have_ab
+g2_is_a:
+gtxn 2 AssetAmount
+store 4
+have_ab:
+
+callsub slot_from_args
+
+// load reserves from box
+callsub push_box_key
+box_get
+// stack: value(bytes), exists(u64)
+store 7   // exists
+store 6   // value bytes
+load 7
+bnz parse_box
+int 0
+store 8   // rA
+int 0
+store 9   // rB
+b add_liq
+parse_box:
+load 6
+extract 0 8
+btoi
+store 8
+load 6
+extract 8 8
+btoi
+store 9
+
+add_liq:
+load 8
+load 4
++
+store 10  // nA
+load 9
+load 5
++
+store 11  // nB
+
+// write box
+callsub push_box_key
+load 10
+itob
+load 11
+itob
+concat
+box_put
+
+int 1
+return
+
+// swap([slot]) -> group: appl, axfer IN
+m_swap:
+global GroupSize
+int 2
+==
+assert
+gtxn 0 TypeEnum
+int 6
+==
+assert
+gtxn 1 TypeEnum
+int 4
+==
+assert
+
+byte "a_id"
+app_global_get
+store 1
+byte "b_id"
+app_global_get
+store 2
+global CurrentApplicationAddress
+store 0
+
+gtxn 1 AssetReceiver
+load 0
+==
+assert
+
+callsub slot_from_args
+
+// load reserves
+callsub push_box_key
+box_get
+store 7   // exists
+store 6   // value
+load 7
+bnz parse2
+err
+parse2:
+load 6
+extract 0 8
+btoi
+store 8    // R_a
+load 6
+extract 8 8
+btoi
+store 9    // R_b
+
+// compute fee on input
+byte "p_fee_bp"
+app_global_get
+store 12
+
+gtxn 1 XferAsset
+load 1
+==
+bnz in_is_A
+// in = B, out = A
+gtxn 1 AssetAmount
+store 13
+load 13
+load 12
+*
+int 10000
+/
+store 14
+load 13
+load 14
+-
+store 15   // dx_net
+
+// k = Ra*Rb
+load 8
+load 9
+*
+store 16
+// Rb' = Rb + dx_net
+load 9
+load 15
++
+store 17
+// Ra' = floor(k / Rb')
+load 16
+load 17
+/
+store 18
+// outA = Ra - Ra'
+load 8
+load 18
+-
+store 19
+load 19
+int 0
+>
+assert
+
+// update reserves
+load 18
+store 8
+load 17
+store 9
+b post_math
+
+in_is_A:
+// in = A, out = B
+gtxn 1 AssetAmount
+store 13
+load 13
+load 12
+*
+int 10000
+/
+store 14
+load 13
+load 14
+-
+store 15
+
+// k = Ra*Rb
+load 8
+load 9
+*
+store 16
+// Ra' = Ra + dx_net
+load 8
+load 15
++
+store 17
+// Rb' = floor(k / Ra')
+load 16
+load 17
+/
+store 18
+// outB = Rb - Rb'
+load 9
+load 18
+-
+store 19
+load 19
+int 0
+>
+assert
+
+// update reserves
+load 17
+store 8
+load 18
+store 9
+
+post_math:
+// write box
+callsub push_box_key
+load 8
+itob
+load 9
+itob
+concat
+box_put
+
+// pay output
+gtxn 1 XferAsset
+load 1
+==
+bnz pay_out_B
+// in B -> out A
+itxn_begin
+int 4
+itxn_field TypeEnum
+txn Sender
+itxn_field AssetReceiver
+load 1
+itxn_field XferAsset
+load 19
+itxn_field AssetAmount
+itxn_submit
+b do_hook
+
+pay_out_B:
+itxn_begin
+int 4
+itxn_field TypeEnum
+txn Sender
+itxn_field AssetReceiver
+load 2
+itxn_field XferAsset
+load 19
+itxn_field AssetAmount
+itxn_submit
+
+do_hook:
+// TEMPORARILY DISABLE hook for debugging
+// TODO: Re-enable once we confirm swap logic works
+b end_swap
+
+// optional post_swap hook
+byte "hook_app_id"
+app_global_get
+dup
+store 20
+int 0
+==
+bnz end_swap
+byte "hook_mask"
+app_global_get
+int 2
+&
+int 0
+==
+bnz end_swap
+
+// Prepare hook call args: ["post_swap", in_id, in_amt, out_id, out_amt, trader]
+// First, determine output asset ID
+gtxn 1 XferAsset
+load 1
+==
+bnz prep_out_b
+load 1  // out_id = A
+b prep_args
+prep_out_b:
+load 2  // out_id = B
+
+prep_args:
+store 21  // out_id
+
+itxn_begin
+int 6
+itxn_field TypeEnum
+load 20
+itxn_field ApplicationID
+
+// Build the args array properly
+byte "post_swap"
+itxn_field ApplicationArgs
+
+gtxn 1 XferAsset
+itob
+itxn_field ApplicationArgs
+
+gtxn 1 AssetAmount
+itob
+itxn_field ApplicationArgs
+
+load 21
+itob
+itxn_field ApplicationArgs
+
+load 19
+itob
+itxn_field ApplicationArgs
+
+txn Sender
+itxn_field ApplicationArgs
+
+itxn_submit
+
+end_swap:
+int 1
+return
